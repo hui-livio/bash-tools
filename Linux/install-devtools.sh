@@ -69,17 +69,14 @@ WITH_NET=0      # minimal 档也要装网络工具时加 --with-net
 LIST_ONLY=0
 FORCE_PM=""
 
-# ----------------------------- 彩色输出 --------------------------------------
-C_RESET=""; C_BLUE=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_GRAY=""
-if [[ -t 1 ]]; then
-    C_RESET=$'\033[0m'; C_BLUE=$'\033[1;34m'; C_GREEN=$'\033[1;32m'
-    C_YELLOW=$'\033[1;33m'; C_RED=$'\033[1;31m'; C_GRAY=$'\033[0;90m'
-fi
-log()  { printf '%s[INFO]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
-ok()   { printf '%s[ OK ]%s %s\n' "$C_GREEN"  "$C_RESET" "$*"; }
-warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-err()  { printf '%s[FAIL]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
-die()  { err "$*"; exit 1; }
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap ""
+Lib::install_err_trap
+
+log() { info "$*"; }      # 本脚本把 log 当作主输出通道，覆盖 lib 的静默 log
 
 usage() {
     cat <<'EOF'
@@ -152,17 +149,14 @@ export DEBIAN_FRONTEND=noninteractive
 # 该文件含 VERSION / NAME 等字段，source 会污染脚本变量，
 # 甚至与同名 readonly 变量冲突而直接报错（例如 Debian/Ubuntu 上的 VERSION）。
 # 改为纯读取解析，安全且无副作用。
-os_field() {
-    local key="$1" file="${2:-/etc/os-release}" line val
-    [[ -r "$file" ]] || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == "$key="* ]] || continue
-        val="${line#*=}"
-        val="${val%$'\r'}"
-        if [[ "$val" == '"'*'"' ]]; then val="${val:1:${#val}-2}"; fi
-        printf '%s' "$val"
-        return 0
-    done < "$file"
+os_field() { OS::osrel "$1" "${2:-/etc/os-release}"; }
+
+OS_NAME="unknown"; OS_VERSION=""; OS_ID=""; OS_ID_LIKE=""; OS_MAJOR=""
+detect_os() {
+    # os-release 解析统一走 lib/20-os.sh 的 OS 对象（不再各自 source /etc/os-release）
+    OS_ID="${SYS[id]}";       OS_ID_LIKE="${SYS[id_like]}"
+    OS_NAME="${SYS[name]}";   OS_VERSION="${SYS[version]}"
+    OS_MAJOR="${SYS[major]}"; OS_FAMILY="${SYS[family]}"
 }
 
 OS_NAME="unknown"; OS_VERSION=""; OS_ID=""; OS_ID_LIKE=""; OS_MAJOR=""
@@ -208,62 +202,20 @@ detect_pm() {
             *) die "不支持的 --pm 值: $FORCE_PM（可选: apt|dnf|yum|zypper|pacman|apk|xbps|emerge）" ;;
         esac
         PM="$FORCE_PM"
-        command -v "$PM" >/dev/null 2>&1 || command -v "${PM}-get" >/dev/null 2>&1 \
+        sys::has_cmd "$PM" || sys::has_cmd "${PM}-get" \
             || warn "强制指定的包管理器 $PM 似乎不存在，仍按指定执行"
         return 0
     fi
-
-    local id="" id_like="" sig=""
-    id="$(os_field ID || true)"
-    id_like="$(os_field ID_LIKE || true)"
-    sig="$id $id_like"
-
-    # 1) 按发行版家族优先判定，避免多包管理器共存时选错
-    case "$sig" in
-        *debian*|*ubuntu*|*mint*|*raspbian*|*kali*|*deepin*|*uos*)
-            command -v apt-get >/dev/null 2>&1 && { PM="apt"; return 0; } ;;
-        *fedora*|*rhel*|*centos*|*rocky*|*almalinux*|*ol*|*nobara*|*opencloudos*|*tencentos*)
-            command -v dnf  >/dev/null 2>&1 && { PM="dnf"; return 0; }
-            command -v yum  >/dev/null 2>&1 && { PM="yum"; return 0; } ;;
-        *suse*|*opensuse*)
-            command -v zypper >/dev/null 2>&1 && { PM="zypper"; return 0; } ;;
-        *arch*|*manjaro*|*artix*|*endeavour*)
-            command -v pacman >/dev/null 2>&1 && { PM="pacman"; return 0; } ;;
-        *alpine*)
-            command -v apk >/dev/null 2>&1 && { PM="apk"; return 0; } ;;
-        *void*)
-            command -v xbps-install >/dev/null 2>&1 && { PM="xbps"; return 0; } ;;
-        *gentoo*)
-            command -v emerge >/dev/null 2>&1 && { PM="emerge"; return 0; } ;;
-    esac
-
-    # 2) 兜底：按可执行文件探测
-    local p
-    for p in apt-get dnf yum zypper pacman apk xbps-install emerge; do
-        if command -v "$p" >/dev/null 2>&1; then
-            case "$p" in
-                apt-get)      PM="apt" ;;
-                xbps-install) PM="xbps" ;;
-                *)            PM="$p" ;;
-            esac
-            return 0
-        fi
-    done
-    return 1
+    PM="$(OS::detect_pm "${OS_FAMILY:-unknown}" "")"
+    if [[ -z "$PM" ]]; then die "未识别到受支持的包管理器"; fi
 }
 
 # ----------------------------- 命令执行封装 ----------------------------------
 # run: 打印并执行；dry-run 时只打印
 run() {
-    if [[ "$DRY_RUN" == "1" ]]; then
-        local s="" a
-        for a in "$@"; do
-            if [[ "$a" == *" "* || -z "$a" ]]; then s+="'$a' "; else s+="$a "; fi
-        done
-        printf '%s$ %s%s\n' "$C_GRAY" "${s% }" "$C_RESET"
-        return 0
-    fi
-    "$@"
+    # dry-run 渲染 + 命令日志统一走 lib/40-exec.sh 的 Runner
+    RUN[dry_run]="${DRY_RUN:-0}"
+    Runner::exec RUN "$@"
 }
 # run_priv: 需要权限时自动加 sudo
 run_priv() {
@@ -694,3 +646,14 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: 开发工具 | 开发环境 | 1 | cmake/gcc/clang/python/node 等工具链
+# PANEL-CMD: 标准集 |  | 编译 + 调试 + 常用 CLI + 网络工具
+# PANEL-CMD: 最小集 | -m | cmake/make/gcc/g++/gdb/python3/git
+# PANEL-CMD: 完整集 | -f | 追加静态检查、valgrind、nmap/iperf3 等
+# PANEL-CMD: 仅列出将要安装的包 | -l | 只读预览
+# PANEL-CMD: 额外装 Node.js LTS | --node-lts | 走 NodeSource 而非发行版仓库

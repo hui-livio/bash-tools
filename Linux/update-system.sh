@@ -39,23 +39,14 @@ REFRESH_OK=0     # 1=索引刷新成功 2=部分失败 0=失败
 UPGRADE_RC=0
 
 # ---------------------------- 日志输出 ----------------------------
-_log_raw() { printf '%s\n' "$*" 2>/dev/null >>"$LOG_FILE" || true; }
-_log_line() { _log_raw "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
-info() { printf '\033[1;32m[信息]\033[0m %s\n' "$*"; _log_line "信息: $*"; }
-warn() { printf '\033[1;33m[警告]\033[0m %s\n' "$*"; _log_line "警告: $*"; }
-err()  { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; _log_line "错误: $*"; }
-step() { printf '\n\033[1;36m===== %s =====\n\033[0m\n' "$*"; _log_line "---- $* ----"; }
-
-# 错误陷阱：打印位置附近信息（$LINENO 在陷阱中不可靠，只报函数名）
-_on_err() {
-    local rc=$?
-    [[ "$_TOLERANT" == "1" ]] && return 0
-    err "脚本在第 ${1} 行附近意外中止（退出码 ${rc}）。"
-    err "请把日志文件发给我排查：${LOG_FILE}"
-    exit "$rc"
-}
-trap '_on_err $LINENO' ERR
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap "$LOG_FILE"
+LOG_FILE="${LOG[file]:-/dev/null}"
+Lib::install_err_trap
+UI[assume_yes]="$AUTO_YES"
 
 # ---------------------------- 通用工具 ----------------------------
 usage() {
@@ -96,28 +87,21 @@ parse_args() {
 }
 
 need_root() {
-    if [[ "$(id -u)" -eq 0 ]]; then
-        return 0
-    fi
-    if command -v sudo >/dev/null 2>&1; then
+    if [[ "$(Sys::euid)" -eq 0 ]]; then return 0; fi
+    if sys::has_cmd sudo; then
         info "当前不是 root，尝试通过 sudo 提权后重新运行……"
         exec sudo -E bash "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
-    else
-        err "请用 root 身份运行：sudo bash ${SCRIPT_NAME}"
-        exit 1
     fi
+    die "请用 root 身份运行：sudo bash ${SCRIPT_NAME}"
 }
 
 confirm() {
-    # $1 = 提示文字
+    # $1 = 提示文字；-y 时自动同意（由 Ui::confirm 统一处理）
     if [[ "$AUTO_YES" -eq 1 ]]; then
         info "已启用 -y，自动确认：$1"
         return 0
     fi
-    local ans=""
-    read -r -p "$1 [y/N]：" ans || ans=""
-    ans="${ans,,}"
-    [[ "$ans" == "y" || "$ans" == "yes" || "$ans" == "是" ]]
+    Ui::confirm UI "$1" n
 }
 
 # 统一的命令执行包装：输出同时落终端 + 日志；失败默认警告不中止
@@ -135,12 +119,17 @@ run() {
 }
 
 # ---------------------------- 系统识别 ----------------------------
+# 发行版 / 版本 / 包管理器统一由 lib/20-os.sh 的 OS 对象提供：
+#   SYS[pretty] SYS[version] SYS[pm] SYS[family] SYS[arch]
 detect_os() {
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        OS_NAME="${NAME:-未知}"
-        OS_VER="${VERSION_ID:-}"
+    OS_NAME="${SYS[name]}"
+    OS_VER="${SYS[version]}"
+}
+
+detect_pm() {
+    PM="${SYS[pm]}"
+    if [[ -z "$PM" ]]; then
+        die "未识别到任何受支持的包管理器（apt/dnf/yum/zypper/pacman/apk）。"
     fi
 }
 
@@ -425,3 +414,13 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: 系统更新 | 系统维护 | 1 | 刷新索引并升级全部软件包
+# PANEL-CMD: 检查可升级项 | --check | 只读，不做任何更改
+# PANEL-CMD: 升级全部软件包 |  | 交互式，会先询问一次
+# PANEL-CMD: 免确认升级 | -y | 自动确认并升级
+# PANEL-CMD: 发行版级升级 | --full -y | 允许卸载有依赖冲突的旧包

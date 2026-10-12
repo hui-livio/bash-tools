@@ -68,17 +68,14 @@ FONT="meslo"         # meslo|jetbrains|hack|firacode|sourcecode|none
 FONT_URL=""          # 自定义字体包下载地址（内网/离线环境可用）
 THEME_URL=""         # 自定义主题文件下载地址（内网/离线环境可用）
 
-# ----------------------------- 彩色输出 --------------------------------------
-C_RESET=""; C_BLUE=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_GRAY=""
-if [[ -t 1 ]]; then
-    C_RESET=$'\033[0m'; C_BLUE=$'\033[1;34m'; C_GREEN=$'\033[1;32m'
-    C_YELLOW=$'\033[1;33m'; C_RED=$'\033[1;31m'; C_GRAY=$'\033[0;90m'
-fi
-log()  { printf '%s[INFO]%s %s\n' "$C_BLUE"   "$C_RESET" "$*"; }
-ok()   { printf '%s[ OK ]%s %s\n' "$C_GREEN"  "$C_RESET" "$*"; }
-warn() { printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-err()  { printf '%s[FAIL]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
-die()  { err "$*"; exit 1; }
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap ""
+Lib::install_err_trap
+
+log() { info "$*"; }      # 本脚本把 log 当作主输出通道，覆盖 lib 的静默 log
 
 usage() {
     cat <<'EOF'
@@ -298,52 +295,16 @@ export DEBIAN_FRONTEND=noninteractive
 
 # ----------------------------- 包管理器探测 ----------------------------------
 PM=""
-os_field() {
-    local key="$1" line val
-    [[ -r /etc/os-release ]] || return 1
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == "$key="* ]] || continue
-        val="${line#*=}"
-        if [[ "$val" == '"'*'"' ]]; then val="${val:1:${#val}-2}"; fi
-        printf '%s' "$val"
-        return 0
-    done < /etc/os-release
-}
+os_field() { OS::osrel "$1" "${2:-/etc/os-release}"; }
 detect_pm() {
-    local sig
-    sig="$(os_field ID || true) $(os_field ID_LIKE || true)"
-    case "$sig" in
-        *debian*|*ubuntu*|*mint*|*deepin*|*uos*|*kali*) command -v apt-get >/dev/null 2>&1 && { PM="apt"; return 0; } ;;
-        *fedora*|*rhel*|*centos*|*rocky*|*almalinux|*opencloudos*|*tencentos*)
-            command -v dnf >/dev/null 2>&1 && { PM="dnf"; return 0; }
-            command -v yum >/dev/null 2>&1 && { PM="yum"; return 0; } ;;
-        *suse*)   command -v zypper >/dev/null 2>&1 && { PM="zypper"; return 0; } ;;
-        *arch*|*manjaro*|*artix*) command -v pacman >/dev/null 2>&1 && { PM="pacman"; return 0; } ;;
-        *alpine*) command -v apk >/dev/null 2>&1 && { PM="apk"; return 0; } ;;
-        *void*)   command -v xbps-install >/dev/null 2>&1 && { PM="xbps"; return 0; } ;;
-    esac
-    local p
-    for p in apt-get dnf yum pacman zypper apk xbps-install; do
-        if command -v "$p" >/dev/null 2>&1; then
-            case "$p" in apt-get) PM="apt";; xbps-install) PM="xbps";; *) PM="$p";; esac
-            return 0
-        fi
-    done
-    return 1
+    # 包管理器判定统一走 lib/20-os.sh（与 install-devtools / update-system 共用一份）
+    PM="$(OS::detect_pm "" "${FORCE_PM:-}")"
+    if [[ -z "$PM" ]]; then err "未识别到受支持的包管理器"; return 1; fi
+    log "包管理器：$PM"
 }
 
 # ----------------------------- 命令封装 --------------------------------------
-run() {
-    if [[ "$DRY_RUN" == "1" ]]; then
-        local s="" a
-        for a in "$@"; do
-            if [[ "$a" == *" "* || -z "$a" ]]; then s+="'$a' "; else s+="$a "; fi
-        done
-        printf '%s$ %s%s\n' "$C_GRAY" "${s% }" "$C_RESET"
-        return 0
-    fi
-    "$@"
-}
+run() { RUN[dry_run]="${DRY_RUN:-0}"; Runner::exec RUN "$@"; }
 
 # ----------------------------- 安装 zsh --------------------------------------
 install_packages() {
@@ -792,3 +753,13 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: zsh 环境 | Shell 环境 | 1 | 全用户共用一份 zsh 配置
+# PANEL-CMD: 安装并切换到 zsh |  | oh-my-zsh + 主题 + 插件 + Nerd Font
+# PANEL-CMD: 仅打印生成的配置 | --print-config | 只读，不改动系统
+# PANEL-CMD: 只装配置不改默认 shell | --skip-chsh | 配置到位，切换自行决定
+# PANEL-CMD: 只给 root 切换 | --only-root | 其他人仅获得配置

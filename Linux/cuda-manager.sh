@@ -125,53 +125,31 @@ declare -A MIN_DRIVER=(
 #  一、基础输出与工具函数
 # =============================================================================
 
-C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''; C_DIM=''
-if [[ -t 1 ]]; then
-  C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
-  C_YELLOW=$'\033[33m'; C_BLUE=$'\033[36m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
-fi
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap ""
+Lib::install_err_trap
 
 say()  { printf '%s\n' "$*"; }
-info() { printf '%s[信息]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
-ok()   { printf '%s[完成]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-warn() { printf '%s[警告]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-err()  { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
-step() { printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
-hint() { printf '%s      %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 hr()   { printf '%s\n' "--------------------------------------------------------------------------------"; }
+# hint 保持本脚本原有的缩进风格（lib 默认带 [提示] 前缀）
+hint() { printf '%s      %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 
-# 中文显示宽度（printf %-Ns 按字节补位会让中文列错位）
-disp_width() {
-  local s="$1" i n w=0 b
-  local LC_ALL=C
-  n=${#s}
-  for (( i=0; i<n; i++ )); do
-    b="${s:i:1}"
-    if [[ "$b" < $'\200' ]]; then
-      w=$(( w + 1 ))
-    else
-      w=$(( w + 2 )); i=$(( i + 2 ))
-    fi
-  done
-  printf '%s' "$w"
-}
+# info / ok / warn / err / step / hint / disp_width / item 由 lib/ 提供：
+#   * info/ok/warn/err/step/hint → lib/00-core.sh 的 Logger
+#   * disp_width                 → lib/10-ui.sh 的 Ui::disp_width
+#   * item                       → lib/10-ui.sh 的 Ui::item（列宽默认取本脚本的 22）
+item() { Ui::item UI "$1" "$2" "${3:-2}" "${4:-22}"; }
 
-# 左对齐补位
+# 左对齐补位（本脚本自有的排版需求）
 pad() {
   local s="$1" w="$2" dw p
-  dw="$(disp_width "$s")" || dw=0
+  dw="$(Ui::disp_width "$s")" || dw=0
   p=$(( w - dw ))
   [[ $p -lt 1 ]] && p=1
   printf '%s%*s' "$s" "$p" ""
-}
-
-# 键值行（缩进 + 中文对齐）
-item() {
-  local l="$1" v="$2" ind="${3:-2}" cw="${4:-22}" w p
-  w="$(disp_width "$l")" || w=0
-  p=$(( cw - w ))
-  [[ $p -lt 1 ]] && p=1
-  printf '%*s%s%*s%s\n' "$ind" "" "$l" "$p" "" "$v"
 }
 
 _log_init() {
@@ -188,11 +166,11 @@ _log_init() {
     : >>"$cand" 2>/dev/null || cand="/dev/null"
   fi
   LOG_FILE="$cand"
+  # 同步给共享库的 Logger 对象，后续 _log_raw / Logger 系列都写同一个文件
+  LOG[file]="$LOG_FILE"
 }
 
-_log_raw() {
-  printf '%s\n' "$*" 2>/dev/null >>"$LOG_FILE" || true
-}
+_log_raw() { Logger::raw LOG "$*"; }
 
 # 最近一次外部命令的完整输出（用于失败诊断）
 _cmd_out_file() {
@@ -412,19 +390,16 @@ run_diag() {
 }
 
 # 交互读取（非交互环境安全）
-read_line() {
-  local p="$1" v=""
-  if [[ -t 0 ]]; then
-    read -r -p "$p" v || v=""
-  else
-    read -r v || v=""
-  fi
-  printf '%s' "$v"
+read_line() {   # 打印式读取（本脚本大量用于命令替换）；内部走 lib 的 Ui::read_line
+  local __v=""
+  Ui::read_line UI __v "$1" || true
+  printf '%s' "$__v"
 }
 
 # 是否继续类提问：受 -y 影响
 confirm() {
-  local msg="$1" a=""
+  # 是否继续类提问：受 -y 影响（本脚本用 yes/no 字符串，这里做一次映射）
+  local msg="$1"
   if [[ "$ASSUME_YES" == "yes" ]]; then
     info "$msg → 已由 -y 自动确认"
     return 0
@@ -434,24 +409,14 @@ confirm() {
     err "请在终端中运行，或显式加上 -y 参数。"
     return 1
   fi
-  a="$(read_line "$msg [y/N]: ")"
-  case "$a" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
+  UI[assume_yes]=0
+  Ui::confirm UI "$msg" n
 }
 
 # 功能开关类提问：不受 -y 影响，默认否
-ask_feature() {
-  local msg="$1" a=""
-  if [[ ! -t 0 ]]; then
-    return 1
-  fi
-  a="$(read_line "$msg [y/N]: ")"
-  case "$a" in
-    y|Y|yes|YES|Yes) return 0 ;;
-    *) return 1 ;;
-  esac
+ask_feature() {   # 功能开关：不受 -y 影响，默认否
+  [[ -t 0 ]] || return 1
+  Ui::feature UI "$1" n
 }
 
 # 破坏性操作确认：必须逐字输入确认词，-y 不生效
@@ -570,69 +535,38 @@ trap '_on_exit' EXIT
 # =============================================================================
 
 detect_wsl() {
-  local kv="" osr="" rel=""
-  kv="$(cat /proc/version 2>/dev/null)" || kv=""
-  osr="$(cat /proc/sys/kernel/osrelease 2>/dev/null)" || osr=""
-  rel="$(uname -r 2>/dev/null)" || rel=""
-
-  if [[ "$kv" == *[Mm]icrosoft* || "$kv" == *WSL* || "$osr" == *[Mm]icrosoft* || "$osr" == *WSL* ]]; then
+  WSL="no"; WSL_VER=""
+  if [[ "${SYS[wsl]}" == "1" ]]; then
     WSL="yes"
-    WSL_VER="WSL1"
-    if [[ "$rel" == *WSL2* || "$rel" =~ ^[5-9]\. ]]; then
-      WSL_VER="WSL2"
-    fi
-    [[ -d /run/WSL ]] && WSL_VER="WSL2"
-    [[ -n "${WSL_INTEROP:-}" ]] && WSL_VER="WSL2"
+    if [[ "${SYS[wsl_version]}" == "2" ]]; then WSL_VER="WSL2"; else WSL_VER="WSL1"; fi
   fi
   return 0
 }
 
 # 读取 /etc/os-release 的字段（避免 source 带来的 set -u 风险）
-_osrel() {
-  local key="$1" v=""
-  v="$(grep -m1 -E "^${key}=" /etc/os-release 2>/dev/null | cut -d= -f2- || true)"
-  v="${v%\"}"; v="${v#\"}"
-  printf '%s' "$v"
-}
+_osrel() { OS::osrel "$1" "${2:-/etc/os-release}"; }
 
 detect_os() {
-  OS_ID="$(_osrel ID)"
-  OS_ID_LIKE="$(_osrel ID_LIKE)"
-  OS_VER="$(_osrel VERSION_ID)"
-  OS_NAME="$(_osrel PRETTY_NAME)"
+  # 复用 lib/20-os.sh 的检测结果（os-release 解析规则全库统一）
+  OS_ID="${SYS[id]}";     OS_ID_LIKE="${SYS[id_like]}"
+  OS_VER="${SYS[version]}"; OS_NAME="${SYS[pretty]}"
   [[ -n "$OS_NAME" ]] || OS_NAME="${OS_ID:-未知发行版} ${OS_VER}"
   return 0
 }
 
 detect_family() {
-  local id="$OS_ID" like="$OS_ID_LIKE"
-  id="${id,,}"
-  like="${like,,}"
-  case "$id" in
-    ubuntu|debian|deepin|uos|kylin|neokylin|linuxmint|raspbian|elementary|zorin|pop|devuan|parrot|kali)
-      FAMILY="debian"; PKG_MGR="apt" ;;
-    rhel|centos|rocky|almalinux|ol|oracle|fedora|amzn|alinux|anolis|openeuler|openEuler|virtuozzo|cloudlinux)
-      FAMILY="rhel"; PKG_MGR="dnf" ;;
-    opensuse*|sles|suse|sled)
-      FAMILY="suse"; PKG_MGR="zypper" ;;
-    arch|manjaro|endeavouros|garuda|cachyos|artix)
-      FAMILY="arch"; PKG_MGR="pacman" ;;
-    alpine)
-      FAMILY="alpine"; PKG_MGR="apk" ;;
-    *)
-      case " $like " in
-        *debian*|*ubuntu*) FAMILY="debian"; PKG_MGR="apt" ;;
-        *rhel*|*fedora*|*centos*) FAMILY="rhel"; PKG_MGR="dnf" ;;
-        *suse*) FAMILY="suse"; PKG_MGR="zypper" ;;
-        *arch*) FAMILY="arch"; PKG_MGR="pacman" ;;
-        *) FAMILY="unknown"; PKG_MGR="" ;;
-      esac
-      ;;
+  # 家族判定表统一在 lib/20-os.sh（已做大小写归一），这里只补 CUDA 需要的包管理器映射
+  FAMILY="$(OS::family_of "$OS_ID" "$OS_ID_LIKE")"
+  case "$FAMILY" in
+    debian) PKG_MGR="apt" ;;
+    rhel)   PKG_MGR="dnf" ;;
+    suse)   PKG_MGR="zypper" ;;
+    arch)   PKG_MGR="pacman" ;;
+    alpine) PKG_MGR="apk" ;;
+    *)      FAMILY="unknown"; PKG_MGR="" ;;
   esac
   # dnf 不存在时退回 yum
-  if [[ "$PKG_MGR" == "dnf" ]] && ! command -v dnf >/dev/null 2>&1; then
-    PKG_MGR="yum"
-  fi
+  if [[ "$PKG_MGR" == "dnf" ]] && ! sys::has_cmd dnf; then PKG_MGR="yum"; fi
   return 0
 }
 
@@ -3509,3 +3443,16 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: CUDA 管理 | 开发环境 | 1 | 只装 Toolkit，不动显卡驱动
+# PANEL-CMD: 环境检测 | detect | 系统 / GPU / 驱动 / 已装版本
+# PANEL-CMD: 列出可安装版本 | list | 联网读取官方源全部版本
+# PANEL-CMD: 安装指定版本 | install {{CUDA 版本:12.6}} | 可精确到补丁号，如 12.6.3
+# PANEL-CMD: 卸载指定版本或全部 | uninstall {{版本或 all:all}} | 需逐字输入 DELETE 确认
+# PANEL-CMD: 切换默认版本 | use {{CUDA 版本:12.6}} | 改变 /usr/local/cuda 指向
+# PANEL-CMD: 环境体检 | doctor | 只读诊断
+# PANEL-CMD: 一键修复 | repair | 修复 dpkg 中断 / 残缺包 / 失效源

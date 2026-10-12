@@ -25,17 +25,16 @@ DEPLOY_USER="${SUDO_USER:-${USER:-root}}"
 DEPLOY_HOME="$HOME"
 SUDO=()
 
-if [[ -t 1 ]]; then
-  C_RESET=$'\033[0m'; C_BLUE=$'\033[1;34m'; C_GREEN=$'\033[1;32m'; C_YELLOW=$'\033[1;33m'; C_RED=$'\033[1;31m'
-else C_RESET= C_BLUE= C_GREEN= C_YELLOW= C_RED=; fi
-info(){ printf '%s[信息]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
-ok(){ printf '%s[完成]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
-warn(){ printf '%s[警告]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
-die(){ printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
-log(){ printf '[%s] %s\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE" 2>/dev/null || true; }
-run(){ log "CMD: $*"; if ((DRY_RUN)); then printf '[dry-run]'; printf ' %q' "$@"; printf '\n'; else "$@"; fi; }
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap "$LOG_FILE"
+Lib::install_err_trap
+
 need(){ command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1"; }
-confirm(){ ((ASSUME_YES)) && return 0; local a; read -r -p "$1 [y/N] " a || return 1; [[ ${a,,} == y || ${a,,} == yes || $a == 是 ]]; }
+confirm(){ ((ASSUME_YES)) && return 0; Ui::confirm UI "$1" n; }
+log(){ Logger::raw LOG "$*"; }
 
 usage(){ cat <<EOF
 $SCRIPT_NAME v$VERSION
@@ -448,3 +447,12 @@ menu(){
 
 main(){ parse_args "$@"; check_arch; mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true; log "start $*"; case ${ACTION:-menu} in export) export_env;; deploy) deploy_env;; menu) menu;; esac; }
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: 环境迁移 | 系统维护 | 0 | Arch 环境导出 / 新机部署
+# PANEL-CMD: 导出当前环境 | export {{导出目录:/tmp/arch-env}} | 包清单 + shell/git/vim 配置
+# PANEL-CMD: 部署到本机 | deploy {{目录或 tar.gz:/tmp/arch-env.tar.gz}} | 在新系统上还原
+# PANEL-CMD: 交互式菜单 | menu | 脚本自带菜单

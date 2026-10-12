@@ -20,22 +20,21 @@
 #   - remove 会永久删除对应私钥和公钥，不提供备份或回滚
 # ============================================================
 
-set -u
+set -Eeuo pipefail
+
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap ""            # 本脚本不落日志文件，仅屏幕输出
+Lib::install_err_trap
 
 # 密钥目录（默认 ~/.ssh；测试时可用环境变量 SSH_KEY_DIR 覆盖）
 SSH_DIR="${SSH_KEY_DIR:-$HOME/.ssh}"
 CONFIG_FILE="$SSH_DIR/config"
 KNOWN_HOSTS="$SSH_DIR/known_hosts"
 
-# ---------- 颜色输出 ----------
-if [[ -t 1 ]]; then
-  C_INFO="\033[1;32m"; C_WARN="\033[1;33m"; C_ERR="\033[1;31m"; C_OFF="\033[0m"
-else
-  C_INFO=""; C_WARN=""; C_ERR=""; C_OFF=""
-fi
-info() { printf "${C_INFO}%s${C_OFF}\n" "$*"; }
-warn() { printf "${C_WARN}[警告] %s${C_OFF}\n" "$*"; }
-err()  { printf "${C_ERR}[错误] %s${C_OFF}\n" "$*"; }
+# 说明：info / warn / err 由 lib/00-core.sh 的 Logger 提供，此处不再重复定义
 
 usage() {
   cat <<'EOF'
@@ -255,3 +254,15 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: SSH 密钥 | 安全 | 0 | 多平台独立密钥 + config 路由
+# PANEL-CMD: 列出已配置平台 | list | 当前 ~/.ssh/config 里的路由
+# PANEL-CMD: 添加 GitHub 密钥 | add github | 自动走 ssh.github.com:443
+# PANEL-CMD: 添加 GitLab 密钥 | add gitlab | gitlab.com 公共站
+# PANEL-CMD: 添加 Gitee 密钥 | add gitee | 码云
+# PANEL-CMD: 添加自建平台 | add custom {{平台名:work}} | 交互式收集 Host 与端口
+# PANEL-CMD: 删除某平台密钥 | remove {{平台名:github}} | 永久删除私钥与路由（不可恢复）

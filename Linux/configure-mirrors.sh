@@ -69,78 +69,44 @@ PROV_ORDER=(tuna ustc aliyun huawei)
 # ----------------------------------------------------------------------------
 # 颜色与日志
 # ----------------------------------------------------------------------------
-if [[ -t 1 ]]; then
-  C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_B=$'\033[36m'; C_0=$'\033[0m'
-else
-  C_R=""; C_G=""; C_Y=""; C_B=""; C_0=""
-fi
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap "${MIRROR_LOG_FILE:-/var/log/china-mirrors.log}"
+Lib::install_err_trap
 
-_log_raw() {
-  [[ -n "${LOG_FILE:-}" ]] || return 0
-  printf '%s\n' "$*" 2>/dev/null >>"$LOG_FILE" || true
-  return 0
-}
-
-info() { printf '%s\n' "${C_G}[信息]${C_0} $*"; _log_raw "INFO: $*"; }
-warn() { printf '%s\n' "${C_Y}[警告]${C_0} $*" >&2; _log_raw "WARN: $*"; }
-die()  { printf '%s\n' "${C_R}[错误]${C_0} $*" >&2; _log_raw "ERROR: $*"; exit 1; }
-
-_on_err() {
-  local rc=$?
-  if [[ "${_TOLERANT:-0}" == "1" ]]; then return 0; fi
-  printf '\n%s\n' "${C_R}[错误]${C_0} 脚本异常中止(退出码 ${rc}), 请把上方最后的报错信息反馈给维护者。" >&2
-  _log_raw "ABORT: rc=${rc}"
-  exit "$rc"
-}
-trap _on_err ERR
+# 说明：颜色、info/warn/die、日志落盘、ERR 陷阱全部由 lib/ 提供。
+#       下面的 init_log 只在日志文件不可写时把它降级到 /tmp。
 
 # ----------------------------------------------------------------------------
 # 通用小工具
 # ----------------------------------------------------------------------------
 
-# 中文表格对齐: 按显示宽度(中文一字算 2)补空格
-disp_width() {
-  local s="$1" i n w=0 b
-  local LC_ALL=C
-  n=${#s}
-  for (( i=0; i<n; i++ )); do
-    b="${s:i:1}"
-    if [[ "$b" < $'\200' ]]; then w=$((w+1)); else w=$((w+2)); i=$((i+2)); fi
-  done
-  printf '%s' "$w"
-}
+# 中文表格对齐（disp_width / item）沿用 lib/10-ui.sh 的实现，此处不再重复定义
 
-item() { # 标签 值 [缩进] [列宽]
-  local l="$1" v="$2" ind="${3:-2}" cw="${4:-26}" w p
-  w="$(disp_width "$l")"
-  p=$(( cw - w ))
-  [[ $p -lt 1 ]] && p=1
-  printf '%*s%s%*s%s\n' "$ind" "" "$l" "$p" "" "$v"
-}
+# item() 由 lib/10-ui.sh 提供，列宽默认 26 与此处不同，统一到 26：
+item() { Ui::item UI "$1" "$2" "${3:-2}" "${4:-26}"; }
 
-confirm() { # 提示语; 返回 0 = 是
-  local prompt="$1" reply=""
-  if [[ "$ASSUME_YES" == "1" ]]; then
+confirm() { # 提示语; 返回 0 = 是（统一走 lib/10-ui.sh 的 Ui::confirm）
+  local prompt="$1"
+  if [[ "${ASSUME_YES:-0}" == "1" ]]; then
     info "$prompt —— 已通过 --yes 自动确认为[是]"
     return 0
   fi
   if [[ ! -t 0 ]]; then
     die "非交互环境无法确认「$prompt」, 请追加 --yes 参数"
   fi
-  read -r -p "$prompt [y/N]: " reply || true
-  case "$reply" in
-    y|Y|yes|是) return 0 ;;
-    *) return 1 ;;
-  esac
+  Ui::confirm UI "$prompt" n
 }
 
 init_log() {
-  LOG_FILE="${MIRROR_LOG_FILE:-/var/log/china-mirrors.log}"
-  if ! touch "$LOG_FILE" 2>/dev/null; then
+  if [[ -z "${LOG_FILE:-}" ]]; then
     LOG_FILE="/tmp/china-mirrors.log"
-    touch "$LOG_FILE" 2>/dev/null || true
+    touch "$LOG_FILE" 2>/dev/null || LOG_FILE=""
+    if [[ -n "$LOG_FILE" ]]; then LOG[file]="$LOG_FILE"; fi
   fi
-  _log_raw "===== configure-mirrors.sh v${VERSION} 启动 ====="
+  Logger::raw LOG "===== configure-mirrors.sh v${VERSION} 启动 ====="
   return 0
 }
 
@@ -759,3 +725,13 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: 镜像源配置 | 软件源 | 1 | Arch / Debian / Ubuntu 切换国内镜像
+# PANEL-CMD: 自动测速换源 | --auto | 并行测速，切到最快镜像站
+# PANEL-CMD: 手动选择镜像站 |  | 交互式菜单挑选 tuna/ustc/aliyun/huawei
+# PANEL-CMD: 查看当前配置 | --show | 只读
+# PANEL-CMD: 回滚到上一次备份 | --restore | 恢复 <原路径>.bak-<时间戳>

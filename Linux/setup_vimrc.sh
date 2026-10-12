@@ -72,17 +72,18 @@ if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
 else
   C_RST=""; C_B=""; C_R=""; C_G=""; C_Y=""; C_BL=""; C_D=""
 fi
-info() { printf '%s[INFO]%s %s\n' "$C_BL" "$C_RST" "$*"; }
-ok()   { printf '%s[ OK ]%s %s\n' "$C_G"  "$C_RST" "$*"; }
-warn() { printf '%s[WARN]%s %s\n' "$C_Y"  "$C_RST" "$*" >&2; }
-err()  { printf '%s[FAIL]%s %s\n' "$C_R"  "$C_RST" "$*" >&2; }
-die()  { err "$*"; exit 1; }
-step() { printf '\n%s==> %s%s\n' "$C_B" "$*" "$C_RST"; }
-dry()  { [ "$DRY_RUN" -eq 1 ] && printf '%s[dry-run]%s %s\n' "$C_D" "$C_RST" "$*" || true; }
+__OPS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=/dev/null
+source "${__OPS_DIR}/lib/lib.sh"
+unset __OPS_DIR
+Lib::bootstrap ""
+Lib::install_err_trap
 
-run() {  # 统一走 dry-run 包装
-  if [ "$DRY_RUN" -eq 1 ]; then dry "$*"; return 0; fi
-  "$@"
+dry()  { [ "${DRY_RUN:-0}" -eq 1 ] && printf '%s[dry-run]%s %s\n' "$C_DIM" "$C_RESET" "$*" || true; }
+
+run() {  # dry-run 包装 + 命令日志，统一走 lib/40-exec.sh 的 Runner
+  RUN[dry_run]="${DRY_RUN:-0}"
+  Runner::exec RUN "$@"
 }
 
 usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
@@ -105,29 +106,19 @@ parse_args() {
 }
 
 require_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    if command -v sudo >/dev/null 2>&1; then
-      info "需要 root 权限，改用 sudo 重新执行…"
-      exec sudo -E bash "$0" "$@"
-    fi
-    die "请以 root 运行：sudo $0"
+  [ "$(Sys::euid)" -eq 0 ] && return 0
+  if sys::has_cmd sudo; then
+    info "需要 root 权限，改用 sudo 重新执行…"
+    exec sudo -E bash "$0" "$@"
   fi
+  die "请以 root 运行：sudo $0"
 }
 
 # ----------------------------- 系统识别 --------------------------------------
 # 只解析需要的字段，**绝不 source** /etc/os-release：
 #   1) source 会污染当前命名空间，可能撞上只读变量（VERSION/NAME/ID 都是常见名）
 #   2) 某些系统的 os-release 含更复杂的写法，直接 source 有风险
-osrel_get() {
-  local key="$1" file="${2:-/etc/os-release}" v=""
-  [ -r "$file" ] || return 0
-  v="$(sed -n "s/^[[:space:]]*${key}=//p" "$file" 2>/dev/null | head -n1)"
-  case "$v" in
-    \"*\") v="${v#\"}"; v="${v%\"}" ;;   # 去掉双引号
-    \'*\') v="${v#\'}"; v="${v%\'}" ;;   # 去掉单引号
-  esac
-  printf '%s' "$v"
-}
+osrel_get() { OS::osrel "$1" "${2:-/etc/os-release}"; }
 
 detect_os() {
   local f=""
@@ -154,21 +145,9 @@ detect_os() {
     OS_PRETTY="${OS_PRETTY:-Linux}"
   fi
 
-  local key=" ${OS_ID} ${OS_LIKE} "
-  case "$key" in
-    *" debian "*|*" ubuntu "*|*" kali "*|*" linuxmint "*|*" deepin "*|*" uos "*|*" raspbian "*|*" devuan "*)
-        OS_FAMILY="debian" ;;
-    *" rhel "*|*" centos "*|*" fedora "*|*" rocky "*|*" almalinux "*|*" ol "*|*" openeuler "*|*" kylin "*|*" anolis "*|*" tencentos "*|*" amzn "*)
-        OS_FAMILY="rhel" ;;
-    *" arch "*|*" archarm "*|*" manjaro "*|*" endeavouros "*|*" garuda "*|*" cachyos "*|*" artix "*)
-        OS_FAMILY="arch" ;;
-    *" suse "*|*" opensuse "*|*" sles "*)
-        OS_FAMILY="suse" ;;
-    *" alpine "*)
-        OS_FAMILY="alpine" ;;
-    *)
-        OS_FAMILY="other" ;;
-  esac
+  # 家族判定统一走 lib/20-os.sh（判定表与其余脚本共用一份）
+  OS_FAMILY="$(OS::family_of "$OS_ID" "$OS_LIKE")"
+  case "$OS_FAMILY" in unknown|"") OS_FAMILY="other" ;; esac
 }
 
 pkg_install_vim() {
@@ -910,3 +889,13 @@ main() {
 }
 
 main "$@"
+
+
+# =============================================================================
+#  面板声明（供 panel.sh 自动发现，不参与脚本执行）
+# =============================================================================
+# PANEL: vim 配置 | Shell 环境 | 1 | 全用户通用 vim 配置
+# PANEL-CMD: 安装（全局 + 新用户） |  | 写入 /etc/vim/vimrc.local + /etc/skel
+# PANEL-CMD: 覆盖已存在的用户 | --all-users | 含 root 在内的所有已有用户
+# PANEL-CMD: 额外配置 Neovim | --nvim | 写入系统级 sysinit.vim
+# PANEL-CMD: 卸载脚本所做改动 | --uninstall | 还原所有备份
