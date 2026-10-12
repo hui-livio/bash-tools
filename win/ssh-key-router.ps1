@@ -327,38 +327,60 @@ function Invoke-List {
 
     Write-Host ('{0,-10} {1,-24} {2,-24} {3,-6} {4}' -f '平台', 'Host', '实际地址', '端口', '密钥文件')
     Write-Host ('-' * 100)
-    $platform = ''
-    $hostName = ''
-    $connectHost = ''
-    $port = ''
-    $identityFile = ''
-    foreach ($line in [System.IO.File]::ReadAllLines($script:ConfigFile)) {
-        $tokens = $line.Trim() -split '\s+'
-        if ($tokens.Count -ge 3 -and $tokens[0] -eq '#' -and $tokens[1] -eq 'BEGIN') {
-            $platform = $tokens[2]
-            $hostName = ''
-            $connectHost = ''
-            $port = ''
-            $identityFile = ''
-            continue
-        }
-        if (-not $platform) {
-            continue
-        }
-        if ($tokens.Count -ge 2) {
-            switch ($tokens[0]) {
-                'Host' { $hostName = $tokens[1] }
-                'HostName' { $connectHost = $tokens[1] }
-                'Port' { $port = $tokens[1] }
-                'IdentityFile' { $identityFile = $tokens[1] }
-            }
-        }
-        if ($tokens.Count -ge 3 -and $tokens[0] -eq '#' -and
-            $tokens[1] -eq 'END' -and $tokens[2] -eq $platform) {
-            Write-Host ('{0,-10} {1,-24} {2,-24} {3,-6} {4}' -f $platform, $hostName, $connectHost, $port, $identityFile)
-            $platform = ''
+
+    $currentPlatform = '手动'
+    $entry = $null
+    $identityFiles = New-Object 'System.Collections.Generic.List[string]'
+    $writeEntry = {
+        if ($null -ne $entry) {
+            $identityFile = [string]::Join(', ', $identityFiles.ToArray())
+            Write-Host ('{0,-10} {1,-24} {2,-24} {3,-6} {4}' -f
+                $entry.Platform, $entry.Host, $entry.HostName, $entry.Port, $identityFile)
         }
     }
+
+    foreach ($line in [System.IO.File]::ReadAllLines($script:ConfigFile)) {
+        if ($line -match '^\s*#\s*BEGIN\s+(\S+)') {
+            $currentPlatform = $Matches[1]
+            continue
+        }
+        if ($line -match '^\s*#\s*END\s+(\S+)') {
+            & $writeEntry
+            $entry = $null
+            $identityFiles.Clear()
+            $currentPlatform = '手动'
+            continue
+        }
+
+        if ($line -match '^\s*#' -or $line -notmatch '^\s*(\S+)\s+(.+?)\s*$') {
+            continue
+        }
+
+        $directive = $Matches[1]
+        $value = $Matches[2].Trim()
+        if ($directive -ieq 'Host') {
+            & $writeEntry
+            $identityFiles.Clear()
+            $entry = @{
+                Platform = $currentPlatform
+                Host = $value
+                HostName = $value
+                Port = '22'
+            }
+            continue
+        }
+        if ($null -eq $entry) {
+            continue
+        }
+
+        switch -Regex ($directive) {
+            '^HostName$' { $entry.HostName = $value; break }
+            '^Port$' { $entry.Port = $value; break }
+            '^IdentityFile$' { $identityFiles.Add($value); break }
+        }
+    }
+
+    & $writeEntry
 }
 
 try {
